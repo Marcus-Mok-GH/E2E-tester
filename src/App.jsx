@@ -1088,8 +1088,9 @@ export default function App() {
               />
             </div>
           </div>
-        ) : appMode === 'e2e' ? (
-          <E2eLanding
+        ) : (
+          <NewRun
+            mode={appMode}
             draft={draft}
             onDraftChange={setDraft}
             onSubmit={submitDraft}
@@ -1098,40 +1099,6 @@ export default function App() {
             planMode={planMode}
             onPlanModeChange={setPlanMode}
           />
-        ) : (
-          <div className="scroll">
-            <div className="hero">
-              <h1 className="hello">Hello, <span className="accent">what shall we automate today?</span></h1>
-              <p className="subhello">Describe any browser task and the agent will complete it.</p>
-              <div className="examples">
-                {[
-                  'Go to wikipedia.org, search for "Alan Turing", and return his birth year',
-                  'On news.ycombinator.com, find the title and score of the #1 story',
-                  'Open quotes.toscrape.com and collect the first 3 quotes on the page',
-                  'Search DuckDuckGo for "OpenAI" and open the first non-ad result',
-                ].map((ex) => (
-                  <button
-                    key={ex}
-                    className="example-chip"
-                    onClick={() => !busy && planAndRun(ex)}
-                    disabled={busy}
-                    title="Try this task"
-                  >
-                    {ex}
-                  </button>
-                ))}
-              </div>
-              <PromptBox
-                value={draft}
-                onChange={setDraft}
-                onSubmit={submitDraft}
-                placeholder={'e.g. "Go to wikipedia.org, search for Alan Turing, and find his birth year"'}
-                disabled={busy}
-                planMode={planMode}
-                onPlanModeChange={setPlanMode}
-              />
-            </div>
-          </div>
         )}
       </section>
     </div>
@@ -1534,166 +1501,82 @@ function SwipeableRow({ onDelete, actionLabel = 'Delete', children }) {
   )
 }
 
-const E2E_SPECIMENS = [
-  {
-    tag: 'Search',
-    text: 'Open duckduckgo.com, search for "Replit Agent", verify a result mentions Replit',
+const NEW_RUN = {
+  e2e: {
+    title: 'New test run',
+    sub: 'Describe a user journey. The agent plans the steps, drives Chromium, and checks every assertion against the final page.',
+    placeholder: 'e.g. Open duckduckgo.com, search for "Replit", verify a result mentions Replit',
+    examples: [
+      { tag: 'search', text: 'Open duckduckgo.com, search for "Replit Agent", verify a result mentions Replit' },
+      { tag: 'content', text: 'Go to news.ycombinator.com and verify the top story title is non-empty' },
+      { tag: 'navigation', text: 'On example.com, click "More information…" and confirm the URL changes to iana.org' },
+      { tag: 'forms', text: 'Sign up on demoqa.com/automation-practice-form with placeholder data and submit' },
+    ],
   },
-  {
-    tag: 'Content',
-    text: 'Go to news.ycombinator.com and verify the top story title is non-empty',
+  'browser-use': {
+    title: 'New browser task',
+    sub: 'Describe what you want done in the browser. The agent drives Chromium and reports back what it found.',
+    placeholder: 'e.g. Go to wikipedia.org, search for Alan Turing, and find his birth year',
+    examples: [
+      { tag: 'lookup', text: 'Go to wikipedia.org, search for "Alan Turing", and return his birth year' },
+      { tag: 'read', text: 'On news.ycombinator.com, find the title and score of the #1 story' },
+      { tag: 'scrape', text: 'Open quotes.toscrape.com and collect the first 3 quotes on the page' },
+      { tag: 'search', text: 'Search DuckDuckGo for "OpenAI" and open the first non-ad result' },
+    ],
   },
-  {
-    tag: 'Navigation',
-    text: 'On example.com, click "More information…" and confirm the URL changes to iana.org',
-  },
-  {
-    tag: 'Forms',
-    text: 'Sign up on demoqa.com/automation-practice-form with placeholder data and submit',
-  },
-]
+}
 
-function E2eLanding({ draft, onDraftChange, onSubmit, onExample, disabled, planMode, onPlanModeChange }) {
+function NewRun({ mode, draft, onDraftChange, onSubmit, onExample, disabled, planMode, onPlanModeChange }) {
+  const copy = NEW_RUN[mode] || NEW_RUN.e2e
   return (
-    <div className="scroll lab-scroll">
-      <div className="lab-landing">
-        <section className="lab-hero">
-          <div className="lab-copy">
-            <div className="lab-eyebrow">
-              <span className="lab-live" aria-hidden="true" />
-              E2E Tester · autonomous browser QA
-            </div>
-            <h1 className="lab-title">
-              Every flow,<br />
-              <em>proven.</em>
-            </h1>
-            <p className="lab-lede">
-              Describe a user journey. The agent plans it, drives a real Chromium browser,
-              and hands back assertions, screenshots, and a verdict you can trust — end to end.
-            </p>
+    <div className="scroll new-run-scroll">
+      <div className="new-run">
+        <h1 className="new-run-title">{copy.title}</h1>
+        <p className="new-run-sub">{copy.sub}</p>
 
-            <div className="lab-composer">
-              <PromptBox
-                value={draft}
-                onChange={onDraftChange}
-                onSubmit={onSubmit}
-                placeholder={'e.g. "Open duckduckgo.com, search for replit, verify a result mentions Replit"'}
-                disabled={disabled}
-                planMode={planMode}
-                onPlanModeChange={onPlanModeChange}
-              />
-            </div>
-
-            <ul className="lab-trust">
-              <li>Real Chromium</li>
-              <li>Vision-guided agent</li>
-              <li>Self-healing selectors</li>
-              <li>Screenshots per step</li>
-            </ul>
+        <div className="new-run-composer">
+          <PromptBox
+            value={draft}
+            onChange={onDraftChange}
+            onSubmit={onSubmit}
+            placeholder={copy.placeholder}
+            disabled={disabled}
+            planMode={planMode}
+            onPlanModeChange={onPlanModeChange}
+          />
+          <div className="new-run-keys">
+            <span><kbd>Enter</kbd> run</span>
+            <span><kbd>Shift</kbd> <kbd>Enter</kbd> new line</span>
           </div>
+        </div>
 
-          <aside className="lab-report" aria-hidden="true">
-            <div className="lab-report-bar">
-              <span className="lab-window-dots">
-                <i /><i /><i />
-              </span>
-              <span className="lab-report-path">run / checkout-flow</span>
-              <span className="lab-verdict">PASS</span>
-            </div>
-            <div className="lab-report-body">
-              <div className="lab-report-row">
-                <span className="dot pass" />
-                <span>Cart total matches items</span>
-                <span className="lab-report-time">0.8s</span>
-              </div>
-              <div className="lab-report-row">
-                <span className="dot pass" />
-                <span>Checkout form accepts input</span>
-                <span className="lab-report-time">1.4s</span>
-              </div>
-              <div className="lab-report-row">
-                <span className="dot pass" />
-                <span>URL includes /order/confirmed</span>
-                <span className="lab-report-time">2.1s</span>
-              </div>
-              <div className="lab-report-row">
-                <span className="dot pass" />
-                <span>Confirmation copy visible</span>
-                <span className="lab-report-time">0.6s</span>
-              </div>
-              <div className="lab-shot">
-                <div className="lab-shot-bar">
-                  <span className="lab-shot-url">shop.example.com/order/confirmed</span>
-                </div>
-                <div className="lab-shot-body">
-                  <span className="lab-shot-title" />
-                  <span className="lab-shot-line" />
-                  <span className="lab-shot-line short" />
-                  <span className="lab-shot-chip" />
-                  <span className="lab-cursor" />
-                </div>
-              </div>
-            </div>
-            <div className="lab-report-foot">
-              <span><b>12</b> actions</span>
-              <span><b>4</b> assertions</span>
-              <span><b>18.4</b>s</span>
-            </div>
-          </aside>
-        </section>
-
-        <section className="lab-steps">
-          <div className="lab-section-head">
-            <span className="lab-kicker">How a run works</span>
-            <h2>Three passes, one verdict.</h2>
+        <section className="new-run-examples" aria-label="Example scenarios">
+          <div className="new-run-examples-head">
+            <span>Examples</span>
           </div>
-          <div className="lab-step-grid">
-            <article className="lab-step">
-              <span className="lab-step-num">01</span>
-              <h3>Plan</h3>
-              <p>A strategist turns your scenario into ordered actions and explicit assertions. Ambiguity gets a question, not a guess.</p>
-            </article>
-            <article className="lab-step">
-              <span className="lab-step-num">02</span>
-              <h3>Act</h3>
-              <p>A vision-guided agent drives Chromium, reads each page, and recovers when a selector moves out from under it.</p>
-            </article>
-            <article className="lab-step">
-              <span className="lab-step-num">03</span>
-              <h3>Verify</h3>
-              <p>Every assertion is checked against the final page, then paired with screenshots and a plain-language summary.</p>
-            </article>
-          </div>
-        </section>
-
-        <section className="lab-specimens">
-          <div className="lab-section-head">
-            <span className="lab-kicker">Specimens</span>
-            <h2>Start from a known flow.</h2>
-          </div>
-          <div className="lab-specimen-grid">
-            {E2E_SPECIMENS.map((s, i) => (
-              <button
-                key={s.text}
-                className="lab-specimen"
-                onClick={() => onExample(s.text)}
-                disabled={disabled}
-                title="Run this scenario"
-              >
-                <span className="lab-specimen-top">
-                  <span className="lab-specimen-tag">{s.tag}</span>
-                  <span className="lab-specimen-index">{String(i + 1).padStart(2, '0')}</span>
-                </span>
-                <span className="lab-specimen-text">{s.text}</span>
-                <span className="lab-specimen-run">Run scenario <i>→</i></span>
-              </button>
+          <ul>
+            {copy.examples.map((ex) => (
+              <li key={ex.text}>
+                <button
+                  type="button"
+                  className="new-run-example"
+                  onClick={() => onExample(ex.text)}
+                  disabled={disabled}
+                >
+                  <span className="new-run-example-tag">{ex.tag}</span>
+                  <span className="new-run-example-text">{ex.text}</span>
+                  <span className="new-run-example-go">Run</span>
+                </button>
+              </li>
             ))}
-          </div>
+          </ul>
         </section>
 
-        <footer className="lab-foot">
-          Built for the flows you would never click through by hand.
-        </footer>
+        <div className="new-run-meta">
+          <span>Playwright · Chromium</span>
+          <span>Planner · GPT-6 Luna</span>
+          <span>Screenshots per step</span>
+        </div>
       </div>
     </div>
   )
