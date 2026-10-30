@@ -129,7 +129,49 @@ function stripJsonFence(s) {
   return t.trim()
 }
 
-async function callAIProvider(messages, { temperature = 0.2, json = true, model, max_tokens = 2048, reasoning_effort = null } = {}) {
+// Close a JSON document that the model stopped mid-way through (usually because
+// the token budget ran out during reasoning). Drops the last, incomplete element
+// and closes any open arrays/objects so we can still use the rest of the plan.
+function repairJson(text) {
+  let t = stripJsonFence(text)
+  const start = t.indexOf('{')
+  if (start < 0) throw new Error('No JSON object in model response')
+  t = t.slice(start)
+
+  const scan = (s) => {
+    let inStr = false
+    let esc = false
+    const stack = []
+    let lastComma = -1
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i]
+      if (inStr) {
+        if (esc) esc = false
+        else if (ch === '\\') esc = true
+        else if (ch === '"') inStr = false
+        continue
+      }
+      if (ch === '"') inStr = true
+      else if (ch === '{' || ch === '[') stack.push(ch)
+      else if (ch === '}' || ch === ']') stack.pop()
+      else if (ch === ',' && stack.length) lastComma = i
+    }
+    return { inStr, stack, lastComma }
+  }
+
+  let body = t
+  const first = scan(t)
+  if (first.inStr || first.stack.length) {
+    body = first.lastComma > 0 ? t.slice(0, first.lastComma) : t.slice(0, t.search(/[\[{]/) + 1)
+  }
+  body = body.replace(/[,\s]+$/, '')
+
+  const second = scan(body)
+  const closers = second.stack.reverse().map((c) => (c === '{' ? '}' : ']')).join('')
+  return body + closers
+}
+
+async function callAIProvider(messages, { temperature = 0.2, json = true, model, max_tokens = 8192, reasoning_effort = null } = {}) {
   const body = {
     model: model || ACT_MODEL,
     max_tokens,
@@ -158,17 +200,45 @@ async function callAIProvider(messages, { temperature = 0.2, json = true, model,
 
 function parsePlan(raw) {
   const s = stripJsonFence(raw)
-  const obj = JSON.parse(s)
+  let obj
+  try {
+    obj = JSON.parse(s)
+  } catch (err) {
+    obj = JSON.parse(repairJson(s))
+  }
   if (!obj || typeof obj !== 'object') throw new Error('Plan is not an object')
   if (!obj.url || typeof obj.url !== 'string') throw new Error('Plan missing url')
   if (!Array.isArray(obj.actions)) obj.actions = []
   if (!Array.isArray(obj.expect)) obj.expect = []
+  // Drop fragments left behind by a repaired (truncated) plan.
+  obj.actions = obj.actions.filter((a) => a && typeof a === 'object' && typeof a.type === 'string')
+  obj.expect = obj.expect.filter((e) => e && typeof e.kind === 'string' && typeof e.value === 'string')
   if (!obj.name) obj.name = obj.url
   // Ensure ending screenshot
   if (!obj.actions.some((a) => a.type === 'screenshot')) {
     obj.actions.push({ type: 'screenshot' })
   }
   return obj
+}
+
+// Ask for a plan, then retry once with less reasoning if the model burned its
+// whole budget thinking and returned empty/truncated JSON.
+async function generatePlan(messages) {
+  const attempts = [
+    { reasoning_effort: PLAN_REASONING },
+    { reasoning_effort: 'low' },
+  ]
+  let lastErr
+  for (const attempt of attempts) {
+    try {
+      const raw = await callAIProvider(messages, { temperature: 0.2, json: true, max_tokens: 8192, ...attempt })
+      return parsePlan(raw)
+    } catch (err) {
+      lastErr = err
+      console.warn(`plan attempt (${attempt.reasoning_effort}) failed:`, err.message || err)
+    }
+  }
+  throw lastErr
 }
 
 const PLAN_STRATEGIST_SYSTEM = `You are the plan-mode strategist for an E2E browser testing product (tests run in a headless browser: clicks, typing, scrolling, URL/text assertions).
@@ -354,7 +424,7 @@ app.post('/api/plan-stream', async (req, res) => {
     // Stream reasoning + content from the Pollinations act planner.
     const body = {
       model: ACT_MODEL,
-      max_tokens: 2048,
+      max_tokens: 8192,
       temperature: 0.2,
       messages: [
         { role: 'system', content: PLAN_SYSTEM },
@@ -406,8 +476,16 @@ app.post('/api/plan-stream', async (req, res) => {
     }
     let plan
     try { plan = parsePlan(full) } catch (err) {
-      send('error', { error: `Plan parse failed: ${err.message || err}` })
-      return end()
+      console.warn('plan-stream parse failed, retrying non-streaming:', err.message || err)
+      try {
+        plan = await generatePlan([
+          { role: 'system', content: PLAN_SYSTEM },
+          { role: 'user', content: prompt },
+        ])
+      } catch (err2) {
+        send('error', { error: `Plan parse failed: ${err2.message || err2}` })
+        return end()
+      }
     }
     send('plan', { plan })
     send('done', {})
@@ -425,11 +503,10 @@ app.post('/api/plan', async (req, res) => {
     const { prompt } = req.body || {}
     if (!prompt || typeof prompt !== 'string') return res.status(400).json({ error: 'prompt required' })
 
-    const raw = await callAIProvider(
-      [{ role: 'system', content: PLAN_SYSTEM }, { role: 'user', content: prompt }],
-      { reasoning_effort: PLAN_REASONING }
-    )
-    const plan = parsePlan(raw)
+    const plan = await generatePlan([
+      { role: 'system', content: PLAN_SYSTEM },
+      { role: 'user', content: prompt },
+    ])
     res.json({ plan })
   } catch (err) {
     console.error('plan error:', err)
@@ -485,11 +562,10 @@ Build a fresh plan that:
 - Finishes the original user goal end-to-end.
 - Keeps actions <= 12.`
 
-    const raw = await callAIProvider(
-      [{ role: 'system', content: PLAN_SYSTEM }, { role: 'user', content: usr }],
-      { temperature: 0.2, json: true, max_tokens: 2048, reasoning_effort: PLAN_REASONING }
-    )
-    const plan = parsePlan(raw)
+    const plan = await generatePlan([
+      { role: 'system', content: PLAN_SYSTEM },
+      { role: 'user', content: usr },
+    ])
     plan.url = startUrl // hard-pin start URL
     res.json({ plan })
   } catch (err) {
@@ -1239,7 +1315,7 @@ async function streamSummaryRun({ plan, finalUrl, title, expectations, passed, d
     return await streamAIProvider(
       [{ role: 'system', content: sys }, { role: 'user', content: usr }],
       onDelta,
-      { temperature: 0.3, reasoning_effort: PLAN_REASONING }
+      { temperature: 0.3, max_tokens: 800, reasoning_effort: 'low' }
     )
   } catch {
     const verdict = passed ? 'passed' : 'failed'
@@ -1266,7 +1342,7 @@ async function summarizeRun({ plan, finalUrl, title, expectations, passed, durat
       `Assertions: ${JSON.stringify(expectations)}\n`
     const out = await callAIProvider(
       [{ role: 'system', content: sys }, { role: 'user', content: usr }],
-      { temperature: 0.3, json: false, reasoning_effort: PLAN_REASONING }
+      { temperature: 0.3, json: false, max_tokens: 800, reasoning_effort: 'low' }
     )
     return out.trim()
   } catch (err) {
@@ -1484,7 +1560,7 @@ function htmlToObservation(html) {
 async function streamAgentTurn({ messages, onReasoning, onContent, signal }) {
   const body = {
     model: AGENT_MODEL,
-    max_tokens: 1024,
+    max_tokens: 4096,
     temperature: 0.2,
     messages,
     tools: AGENT_TOOLS,
