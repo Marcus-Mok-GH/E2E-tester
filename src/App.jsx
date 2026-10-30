@@ -660,7 +660,7 @@ export default function App() {
       title: '',
       duration: null,
       error: null,
-      log: 'Plan mode: GLM 5.1 strategist (max reasoning) — only tool: create_plan → act agent…\n',
+      log: 'Plan mode: GPT-6 Luna strategist (max reasoning) — only tool: create_plan → act agent…\n',
     }
     setTests((prev) => [draftTest, ...prev])
     setSelectedId(id)
@@ -970,7 +970,7 @@ export default function App() {
 
               {selected.status === 'clarifying' && (
                 <div className="bubble clarify">
-                  <div className="who">Plan mode · GLM 5.1</div>
+                  <div className="who">Plan mode · GPT-6 Luna</div>
                   {selected.strategistMessage == null && busy ? (
                     <div className="clarify-loading">
                       <span className="loader" aria-hidden="true" />
@@ -1072,7 +1072,7 @@ export default function App() {
 
               <div className="aside-h">Stack</div>
               <div className="kv">
-                <div className="k">Plan mode</div><div className="v">GLM 5.1 · create_plan only</div>
+                <div className="k">Plan mode</div><div className="v">GPT-6 Luna · create_plan only</div>
               </div>
             </aside>
 
@@ -1558,7 +1558,7 @@ function PromptBox({ value, onChange, onSubmit, placeholder, disabled, planMode,
       <div className="prompt-row">
         <div className="chip-row">
           {onPlanModeChange && (
-            <label className="chip plan-toggle" title="GLM 5.1 (max reasoning): only tool is create_plan to brief the act agent; otherwise asks in text">
+            <label className="chip plan-toggle" title="GPT-6 Luna (max reasoning): only tool is create_plan to brief the act agent; otherwise asks in text">
               <input
                 type="checkbox"
                 checked={Boolean(planMode)}

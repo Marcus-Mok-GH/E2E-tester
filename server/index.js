@@ -8,36 +8,37 @@ app.use(express.json({ limit: '2mb' }))
 const SERVE_STATIC = process.env.SERVE_STATIC === '1'
 const PORT = Number(process.env.PORT || (SERVE_STATIC ? 5000 : process.env.PORT_API || 8000))
 const HOST = SERVE_STATIC ? '0.0.0.0' : '127.0.0.1'
-const FIREWORKS_API_KEY = process.env.FIREWORKS_API_KEY
-const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY
-/** Model for JSON test planning + post-run summary ("act" path). */
-const FIREWORKS_ACT_MODEL =
-  process.env.FIREWORKS_ACT_MODEL ||
-  process.env.FIREWORKS_MODEL ||
-  'accounts/fireworks/models/kimi-k2p6'
-/** Vision-capable model used for the agentic loop so it can actually look at the screenshot.
- *  Override with FIREWORKS_AGENT_MODEL. Default: Kimi K2.6 (latest non-Llama multimodal + tool use). */
-const FIREWORKS_AGENT_MODEL =
-  process.env.FIREWORKS_AGENT_MODEL || 'accounts/fireworks/models/kimi-k2p6'
-/** GLM 5.1 (Z.ai) for plan mode — Fireworks serverless ID; override with FIREWORKS_PLAN_MODEL. */
-const FIREWORKS_PLAN_MODEL =
-  process.env.FIREWORKS_PLAN_MODEL || 'accounts/fireworks/models/glm-5p1'
-/** Reasoning tier for plan-mode calls: low | medium | high (default high). */
-const FIREWORKS_PLAN_REASONING = process.env.FIREWORKS_PLAN_REASONING || 'high'
 
-if (!FIREWORKS_API_KEY) console.warn('[warn] FIREWORKS_API_KEY not set')
+/** AI provider: Pollinations AI (OpenAI-compatible gateway). */
+const AI_API_KEY = (process.env.POLLINATIONS_API_KEY || '').trim()
+const AI_BASE_URL = (process.env.POLLINATIONS_BASE_URL || 'https://gen.pollinations.ai/v1').replace(/\/+$/, '')
+const DEFAULT_AI_MODEL = process.env.POLLINATIONS_MODEL || 'openai/gpt-6-luna'
+/** Model for JSON test planning + post-run summary ("act" path). */
+const ACT_MODEL = process.env.POLLINATIONS_ACT_MODEL || DEFAULT_AI_MODEL
+/** Vision + tool-calling model used for the agentic loop. */
+const AGENT_MODEL = process.env.POLLINATIONS_AGENT_MODEL || DEFAULT_AI_MODEL
+/** Strategist model for plan mode. */
+const PLAN_MODEL = process.env.POLLINATIONS_PLAN_MODEL || DEFAULT_AI_MODEL
+/** Reasoning tier for plan-mode calls: low | medium | high (default high). */
+const PLAN_REASONING = process.env.POLLINATIONS_PLAN_REASONING || 'high'
+const AI_READY = Boolean(AI_BASE_URL && DEFAULT_AI_MODEL)
+const AI_HEADERS = AI_API_KEY ? { Authorization: `Bearer ${AI_API_KEY}` } : {}
+const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY
+
+if (!AI_API_KEY) console.warn('[warn] POLLINATIONS_API_KEY not set — anonymous tier only allows basic non-streaming calls')
 if (!FIRECRAWL_API_KEY) console.warn('[warn] FIRECRAWL_API_KEY not set')
 
 app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
-    fireworks: Boolean(FIREWORKS_API_KEY),
+    aiProvider: 'pollinations',
+    aiConfigured: Boolean(AI_API_KEY),
     firecrawl: Boolean(FIRECRAWL_API_KEY),
     db: dbReady,
-    actModel: FIREWORKS_ACT_MODEL,
-    agentModel: FIREWORKS_AGENT_MODEL,
-    planModel: FIREWORKS_PLAN_MODEL,
-    planReasoning: FIREWORKS_PLAN_REASONING,
+    actModel: ACT_MODEL,
+    agentModel: AGENT_MODEL,
+    planModel: PLAN_MODEL,
+    planReasoning: PLAN_REASONING,
   })
 })
 
@@ -129,9 +130,9 @@ function stripJsonFence(s) {
   return t.trim()
 }
 
-async function callFireworks(messages, { temperature = 0.2, json = true, model, max_tokens = 2048, reasoning_effort = null } = {}) {
+async function callAIProvider(messages, { temperature = 0.2, json = true, model, max_tokens = 2048, reasoning_effort = null } = {}) {
   const body = {
-    model: model || FIREWORKS_ACT_MODEL,
+    model: model || ACT_MODEL,
     max_tokens,
     temperature,
     messages,
@@ -139,20 +140,20 @@ async function callFireworks(messages, { temperature = 0.2, json = true, model, 
   if (reasoning_effort) body.reasoning_effort = reasoning_effort
   if (json) body.response_format = { type: 'json_object' }
 
-  const r = await fetch('https://api.fireworks.ai/inference/v1/chat/completions', {
+  const r = await fetch(`${AI_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${FIREWORKS_API_KEY}`,
+      ...AI_HEADERS,
     },
     body: JSON.stringify(body),
   })
   const text = await r.text()
   if (!r.ok) {
-    throw new Error(`Fireworks ${r.status}: ${text.slice(0, 600)}`)
+    throw new Error(`Pollinations ${r.status}: ${text.slice(0, 600)}`)
   }
   let data
-  try { data = JSON.parse(text) } catch { throw new Error('Fireworks returned non-JSON') }
+  try { data = JSON.parse(text) } catch { throw new Error('Pollinations returned non-JSON') }
   return data.choices?.[0]?.message?.content || ''
 }
 
@@ -237,43 +238,42 @@ function sanitizeAssistantSnapshot(raw) {
   return out
 }
 
-async function callFireworksPlanStrategist(messages, { tool_choice = 'auto', max_tokens = 8192 } = {}) {
+async function callAIPlanStrategist(messages, { tool_choice = 'auto', max_tokens = 8192 } = {}) {
   const body = {
-    model: FIREWORKS_PLAN_MODEL,
+    model: PLAN_MODEL,
     max_tokens,
     temperature: 0.35,
     messages,
     tools: CREATE_PLAN_TOOLS,
-    reasoning_effort: FIREWORKS_PLAN_REASONING,
+    reasoning_effort: PLAN_REASONING,
   }
   if (tool_choice !== 'auto') body.tool_choice = tool_choice
   const hasPriorAssistant = messages.some((m) => m.role === 'assistant')
-  if (hasPriorAssistant) body.reasoning_history = 'preserved'
-
-  const r = await fetch('https://api.fireworks.ai/inference/v1/chat/completions', {
+  
+  const r = await fetch(`${AI_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${FIREWORKS_API_KEY}`,
+      ...AI_HEADERS,
     },
     body: JSON.stringify(body),
   })
   const text = await r.text()
   if (!r.ok) {
-    throw new Error(`Fireworks ${r.status}: ${text.slice(0, 600)}`)
+    throw new Error(`Pollinations ${r.status}: ${text.slice(0, 600)}`)
   }
   let data
   try {
     data = JSON.parse(text)
   } catch {
-    throw new Error('Fireworks returned non-JSON')
+    throw new Error('Pollinations returned non-JSON')
   }
   return data.choices?.[0]?.message || null
 }
 
 app.post('/api/plan-intake', async (req, res) => {
   try {
-    if (!FIREWORKS_API_KEY) return res.status(400).json({ error: 'FIREWORKS_API_KEY missing' })
+    if (!AI_READY) return res.status(400).json({ error: 'AI provider not configured' })
     const { goal, answers, assistantSnapshot: assistantSnapRaw } = req.body || {}
     if (!goal || typeof goal !== 'string') return res.status(400).json({ error: 'goal required' })
 
@@ -294,7 +294,7 @@ app.post('/api/plan-intake', async (req, res) => {
       })
     }
 
-    const msg = await callFireworksPlanStrategist(messages, {
+    const msg = await callAIPlanStrategist(messages, {
       tool_choice: forceTool ? { type: 'function', function: { name: 'create_plan' } } : 'auto',
     })
     if (!msg) return res.status(502).json({ error: 'Empty strategist response' })
@@ -347,14 +347,14 @@ app.post('/api/plan-stream', async (req, res) => {
   const heartbeat = setInterval(() => { try { res.write(`: hb ${Date.now()}\n\n`) } catch {} }, 10000)
   const end = () => { clearInterval(heartbeat); try { res.end() } catch {} }
   try {
-    if (!FIREWORKS_API_KEY) { send('error', { error: 'FIREWORKS_API_KEY missing' }); return end() }
+    if (!AI_READY) { send('error', { error: 'AI provider not configured' }); return end() }
     const { prompt } = req.body || {}
     if (!prompt || typeof prompt !== 'string') { send('error', { error: 'prompt required' }); return end() }
     send('start', { stage: 'plan' })
 
-    // Stream reasoning + content from Fireworks act planner.
+    // Stream reasoning + content from the Pollinations act planner.
     const body = {
-      model: FIREWORKS_ACT_MODEL,
+      model: ACT_MODEL,
       max_tokens: 2048,
       temperature: 0.2,
       messages: [
@@ -363,20 +363,20 @@ app.post('/api/plan-stream', async (req, res) => {
       ],
       response_format: { type: 'json_object' },
       stream: true,
-      reasoning_effort: FIREWORKS_PLAN_REASONING,
+      reasoning_effort: PLAN_REASONING,
     }
-    const r = await fetch('https://api.fireworks.ai/inference/v1/chat/completions', {
+    const r = await fetch(`${AI_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${FIREWORKS_API_KEY}`,
+        ...AI_HEADERS,
         Accept: 'text/event-stream',
       },
       body: JSON.stringify(body),
     })
     if (!r.ok || !r.body) {
       const t = await r.text().catch(() => '')
-      send('error', { error: `Fireworks ${r.status}: ${t.slice(0, 200)}` })
+      send('error', { error: `Pollinations ${r.status}: ${t.slice(0, 200)}` })
       return end()
     }
     const reader = r.body.getReader()
@@ -422,13 +422,13 @@ app.post('/api/plan-stream', async (req, res) => {
 
 app.post('/api/plan', async (req, res) => {
   try {
-    if (!FIREWORKS_API_KEY) return res.status(400).json({ error: 'FIREWORKS_API_KEY missing' })
+    if (!AI_READY) return res.status(400).json({ error: 'AI provider not configured' })
     const { prompt } = req.body || {}
     if (!prompt || typeof prompt !== 'string') return res.status(400).json({ error: 'prompt required' })
 
-    const raw = await callFireworks(
+    const raw = await callAIProvider(
       [{ role: 'system', content: PLAN_SYSTEM }, { role: 'user', content: prompt }],
-      { reasoning_effort: FIREWORKS_PLAN_REASONING }
+      { reasoning_effort: PLAN_REASONING }
     )
     const plan = parsePlan(raw)
     res.json({ plan })
@@ -444,7 +444,7 @@ app.post('/api/plan', async (req, res) => {
 // that starts at that URL and finishes the user's original intent.
 app.post('/api/replan', async (req, res) => {
   try {
-    if (!FIREWORKS_API_KEY) return res.status(400).json({ error: 'FIREWORKS_API_KEY missing' })
+    if (!AI_READY) return res.status(400).json({ error: 'AI provider not configured' })
     if (!FIRECRAWL_API_KEY) return res.status(400).json({ error: 'FIRECRAWL_API_KEY missing' })
     const { prompt, plan: priorPlan, currentUrl, failedAt } = req.body || {}
     if (!prompt || typeof prompt !== 'string') return res.status(400).json({ error: 'prompt required' })
@@ -492,9 +492,9 @@ Build a fresh plan that:
 - Finishes the original user goal end-to-end.
 - Keeps actions <= 12.`
 
-    const raw = await callFireworks(
+    const raw = await callAIProvider(
       [{ role: 'system', content: PLAN_SYSTEM }, { role: 'user', content: usr }],
-      { temperature: 0.2, json: true, max_tokens: 2048, reasoning_effort: FIREWORKS_PLAN_REASONING }
+      { temperature: 0.2, json: true, max_tokens: 2048, reasoning_effort: PLAN_REASONING }
     )
     const plan = parsePlan(raw)
     plan.url = startUrl // hard-pin start URL
@@ -1193,27 +1193,27 @@ function buildStreamingActions(planActions) {
   return { actions: out, frameMap }
 }
 
-async function streamFireworks(messages, onDelta, { temperature = 0.3, model, max_tokens = 600, reasoning_effort = null } = {}) {
+async function streamAIProvider(messages, onDelta, { temperature = 0.3, model, max_tokens = 600, reasoning_effort = null } = {}) {
   const body = {
-    model: model || FIREWORKS_ACT_MODEL,
+    model: model || ACT_MODEL,
     max_tokens,
     temperature,
     messages,
     stream: true,
   }
   if (reasoning_effort) body.reasoning_effort = reasoning_effort
-  const r = await fetch('https://api.fireworks.ai/inference/v1/chat/completions', {
+  const r = await fetch(`${AI_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${FIREWORKS_API_KEY}`,
+      ...AI_HEADERS,
       Accept: 'text/event-stream',
     },
     body: JSON.stringify(body),
   })
   if (!r.ok || !r.body) {
     const t = await r.text().catch(() => '')
-    throw new Error(`Fireworks stream ${r.status}: ${t.slice(0, 300)}`)
+    throw new Error(`Pollinations stream ${r.status}: ${t.slice(0, 300)}`)
   }
   const reader = r.body.getReader()
   const decoder = new TextDecoder()
@@ -1244,7 +1244,7 @@ async function streamFireworks(messages, onDelta, { temperature = 0.3, model, ma
 }
 
 async function streamSummaryRun({ plan, finalUrl, title, expectations, passed, durationMs }, onDelta) {
-  if (!FIREWORKS_API_KEY) {
+  if (!AI_READY) {
     const verdict = passed ? 'passed' : 'failed'
     const msg = `Test ${verdict} in ${durationMs}ms. Final page: ${title || finalUrl}.`
     onDelta(msg)
@@ -1260,10 +1260,10 @@ async function streamSummaryRun({ plan, finalUrl, title, expectations, passed, d
     `Outcome: ${passed ? 'PASSED' : 'FAILED'}\n` +
     `Assertions: ${JSON.stringify(expectations)}\n`
   try {
-    return await streamFireworks(
+    return await streamAIProvider(
       [{ role: 'system', content: sys }, { role: 'user', content: usr }],
       onDelta,
-      { temperature: 0.3, reasoning_effort: FIREWORKS_PLAN_REASONING }
+      { temperature: 0.3, reasoning_effort: PLAN_REASONING }
     )
   } catch {
     const verdict = passed ? 'passed' : 'failed'
@@ -1274,7 +1274,7 @@ async function streamSummaryRun({ plan, finalUrl, title, expectations, passed, d
 }
 
 async function summarizeRun({ plan, finalUrl, title, expectations, passed, durationMs }) {
-  if (!FIREWORKS_API_KEY) {
+  if (!AI_READY) {
     const verdict = passed ? 'passed' : 'failed'
     return `Test ${verdict} in ${durationMs}ms. Final page: ${title || finalUrl}.`
   }
@@ -1288,9 +1288,9 @@ async function summarizeRun({ plan, finalUrl, title, expectations, passed, durat
       `Duration: ${durationMs}ms\n` +
       `Outcome: ${passed ? 'PASSED' : 'FAILED'}\n` +
       `Assertions: ${JSON.stringify(expectations)}\n`
-    const out = await callFireworks(
+    const out = await callAIProvider(
       [{ role: 'system', content: sys }, { role: 'user', content: usr }],
-      { temperature: 0.3, json: false, reasoning_effort: FIREWORKS_PLAN_REASONING }
+      { temperature: 0.3, json: false, reasoning_effort: PLAN_REASONING }
     )
     return out.trim()
   } catch (err) {
@@ -1507,23 +1507,22 @@ function htmlToObservation(html) {
 
 async function streamAgentTurn({ messages, onReasoning, onContent, signal }) {
   const body = {
-    model: FIREWORKS_AGENT_MODEL,
+    model: AGENT_MODEL,
     max_tokens: 1024,
     temperature: 0.2,
     messages,
     tools: AGENT_TOOLS,
     tool_choice: 'auto',
     stream: true,
-    reasoning_effort: FIREWORKS_PLAN_REASONING,
+    reasoning_effort: PLAN_REASONING,
   }
   const hasPriorAssistant = messages.some((m) => m.role === 'assistant')
-  if (hasPriorAssistant) body.reasoning_history = 'preserved'
-
-  const r = await fetch('https://api.fireworks.ai/inference/v1/chat/completions', {
+  
+  const r = await fetch(`${AI_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${FIREWORKS_API_KEY}`,
+      ...AI_HEADERS,
       Accept: 'text/event-stream',
     },
     body: JSON.stringify(body),
@@ -1531,7 +1530,7 @@ async function streamAgentTurn({ messages, onReasoning, onContent, signal }) {
   })
   if (!r.ok || !r.body) {
     const t = await r.text().catch(() => '')
-    throw new Error(`Fireworks ${r.status}: ${t.slice(0, 300)}`)
+    throw new Error(`Pollinations ${r.status}: ${t.slice(0, 300)}`)
   }
   const reader = r.body.getReader()
   const decoder = new TextDecoder()
@@ -1584,7 +1583,7 @@ async function forceFinishVerdict({ goal, observation, signal, systemPrompt }) {
   const obsTitle = observation?.title || ''
   const obsText = String(observation?.text || '').slice(0, 6000)
   const body = {
-    model: FIREWORKS_AGENT_MODEL,
+    model: AGENT_MODEL,
     max_tokens: 220,
     temperature: 0,
     messages: [
@@ -1603,22 +1602,22 @@ async function forceFinishVerdict({ goal, observation, signal, systemPrompt }) {
     tools: AGENT_TOOLS,
     tool_choice: { type: 'function', function: { name: 'finish' } },
   }
-  const r = await fetch('https://api.fireworks.ai/inference/v1/chat/completions', {
+  const r = await fetch(`${AI_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${FIREWORKS_API_KEY}`,
+      ...AI_HEADERS,
     },
     body: JSON.stringify(body),
     signal,
   })
   const text = await r.text()
-  if (!r.ok) throw new Error(`Fireworks ${r.status}: ${text.slice(0, 300)}`)
+  if (!r.ok) throw new Error(`Pollinations ${r.status}: ${text.slice(0, 300)}`)
   let data
   try {
     data = JSON.parse(text)
   } catch {
-    throw new Error('Fireworks returned non-JSON')
+    throw new Error('Pollinations returned non-JSON')
   }
   const calls = data?.choices?.[0]?.message?.tool_calls
   const call = Array.isArray(calls) ? calls.find((c) => c?.function?.name === 'finish') : null
@@ -1671,7 +1670,7 @@ app.post('/api/run-agent', async (req, res) => {
   // Background mode: kick off the agent loop, return immediately, and let
   // clients attach to /api/runs/:taskId/events to receive live + replayed
   // events. The run keeps going even if no client is attached.
-  if (!FIREWORKS_API_KEY) return res.status(400).json({ error: 'FIREWORKS_API_KEY missing' })
+  if (!AI_READY) return res.status(400).json({ error: 'AI provider not configured' })
   if (!FIRECRAWL_API_KEY) return res.status(400).json({ error: 'FIRECRAWL_API_KEY missing' })
   const { goal, startUrl, taskId, mode, maxSteps } = req.body || {}
   if (!goal || typeof goal !== 'string') return res.status(400).json({ error: 'goal required' })
@@ -2095,7 +2094,7 @@ Intent: ${intentLabel}
 
 HTML snippet:
 ${trimmedHtml}`
-        const raw = await callFireworks(
+        const raw = await callAIProvider(
           [{ role: 'system', content: sys }, { role: 'user', content: usr }],
           { temperature: 0, json: true, max_tokens: 200 }
         )

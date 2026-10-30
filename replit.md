@@ -6,10 +6,12 @@ was empty on import, so this is a fresh scaffold.
 ## Stack
 - React 18 + Vite 5 (JSX, no TypeScript)
 - Express 5 backend on port 8000 (proxied via `/api` from Vite)
-- AI planner: Fireworks AI — Kimi K2.6 (`accounts/fireworks/models/kimi-k2p6`)
-  - Override with `FIREWORKS_ACT_MODEL` (or legacy `FIREWORKS_MODEL`) env var
-- Plan-mode strategist model: `FIREWORKS_PLAN_MODEL` (default `accounts/fireworks/models/glm-5p1`)
-- Agent-loop model: `FIREWORKS_AGENT_MODEL` (default `accounts/fireworks/models/kimi-k2p6`)
+- AI provider: Pollinations AI (OpenAI-compatible gateway at `https://gen.pollinations.ai/v1`)
+- Default model: `openai/gpt-6-luna` (GPT-6 Luna, vision + tool calling)
+  - Override with `POLLINATIONS_MODEL`
+- Plan-mode strategist model: `POLLINATIONS_PLAN_MODEL` (defaults to `openai/gpt-6-luna`)
+- Agent-loop model: `POLLINATIONS_AGENT_MODEL` (defaults to `openai/gpt-6-luna`)
+- Reasoning tier: `POLLINATIONS_PLAN_REASONING` (default `high`)
 - Browser execution: Firecrawl `/v1/scrape` with `actions`
 
 ## Layout
@@ -35,7 +37,7 @@ was empty on import, so this is a fresh scaffold.
 - Deletes propagate to the server.
 
 ## Secrets required
-- `FIREWORKS_API_KEY`
+- `POLLINATIONS_API_KEY` (required for streaming, tools, and JSON mode; anonymous tier only allows basic calls)
 - `FIRECRAWL_API_KEY`
 
 ## browser-use style element index (agent mode)
