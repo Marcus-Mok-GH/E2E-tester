@@ -12,7 +12,8 @@ was empty on import, so this is a fresh scaffold.
 - Plan-mode strategist model: `POLLINATIONS_PLAN_MODEL` (defaults to `openai/gpt-6-luna`)
 - Agent-loop model: `POLLINATIONS_AGENT_MODEL` (defaults to `openai/gpt-6-luna`)
 - Reasoning tier: `POLLINATIONS_PLAN_REASONING` (default `high`)
-- Browser execution: Firecrawl `/v1/scrape` with `actions`
+- Browser execution: local headless Chromium via Playwright (`server/browser.js`) — no API key needed
+  - Exposes a Firecrawl-compatible `scrape()` shape (html, markdown, screenshot, actions.javascriptReturns)
 
 ## Layout
 - `index.html`, `vite.config.js`, `package.json`
@@ -38,11 +39,10 @@ was empty on import, so this is a fresh scaffold.
 
 ## Secrets required
 - `POLLINATIONS_API_KEY` (required for streaming, tools, and JSON mode; anonymous tier only allows basic calls)
-- `FIRECRAWL_API_KEY`
 
 ## browser-use style element index (agent mode)
 - Before each agent turn, `buildElementIndexAndOverlayScript()` runs in the
-  page via Firecrawl `executeJavascript`. It assigns `[1]`, `[2]`, `[3]`…
+  page via the local browser adapter's `executeJavascript` action. It assigns `[1]`, `[2]`, `[3]`…
   indices to every visible interactive element and injects a fixed-position
   overlay with cyan border + badge per element — matching browser-use's DOM
   annotation approach.

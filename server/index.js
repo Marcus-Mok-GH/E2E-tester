@@ -1,6 +1,7 @@
 import express from 'express'
 import { mountStatic } from './static.js'
 import { listTasks, getTask, upsertTask, deleteTask, dbReady } from './db.js'
+import { scrape, closeBrowser } from './browser.js'
 
 const app = express()
 app.use(express.json({ limit: '2mb' }))
@@ -23,17 +24,15 @@ const PLAN_MODEL = process.env.POLLINATIONS_PLAN_MODEL || DEFAULT_AI_MODEL
 const PLAN_REASONING = process.env.POLLINATIONS_PLAN_REASONING || 'high'
 const AI_READY = Boolean(AI_BASE_URL && DEFAULT_AI_MODEL)
 const AI_HEADERS = AI_API_KEY ? { Authorization: `Bearer ${AI_API_KEY}` } : {}
-const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY
 
 if (!AI_API_KEY) console.warn('[warn] POLLINATIONS_API_KEY not set — anonymous tier only allows basic non-streaming calls')
-if (!FIRECRAWL_API_KEY) console.warn('[warn] FIRECRAWL_API_KEY not set')
 
 app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
     aiProvider: 'pollinations',
     aiConfigured: Boolean(AI_API_KEY),
-    firecrawl: Boolean(FIRECRAWL_API_KEY),
+    browser: 'local-chromium',
     db: dbReady,
     actModel: ACT_MODEL,
     agentModel: AGENT_MODEL,
@@ -86,7 +85,7 @@ app.delete('/api/tasks/:id', async (req, res) => {
 })
 
 const PLAN_SYSTEM = `You are an expert end-to-end test planner.
-You receive a single user scenario in plain English and must produce a JSON test plan that can be executed by a headless browser via the Firecrawl /scrape "actions" API.
+You receive a single user scenario in plain English and must produce a JSON test plan that can be executed by a headless browser via the scrape "actions" API.
 
 Return ONLY a JSON object — no prose, no markdown — with the exact shape:
 {
@@ -108,7 +107,7 @@ Return ONLY a JSON object — no prose, no markdown — with the exact shape:
   ]
 }
 
-CRITICAL RULES (Firecrawl semantics):
+CRITICAL RULES (browser action semantics):
 - "write" has NO selector. To type into a field, ALWAYS emit a "click" with the input's selector first, then a "write" with just the text. Example:
     { "type": "click", "selector": "#email" },
     { "type": "write", "text": "demo@example.com" }
@@ -172,7 +171,7 @@ function parsePlan(raw) {
   return obj
 }
 
-const PLAN_STRATEGIST_SYSTEM = `You are the plan-mode strategist for an E2E browser testing product (tests run via Firecrawl: clicks, typing, scrolling, URL/text assertions).
+const PLAN_STRATEGIST_SYSTEM = `You are the plan-mode strategist for an E2E browser testing product (tests run in a headless browser: clicks, typing, scrolling, URL/text assertions).
 
 You have NO tools except one: create_plan. Calling create_plan sends ONE detailed natural-language brief to the separate "act" agent, which then builds and runs the executable test. You cannot browse, scrape, or run code.
 
@@ -445,7 +444,6 @@ app.post('/api/plan', async (req, res) => {
 app.post('/api/replan', async (req, res) => {
   try {
     if (!AI_READY) return res.status(400).json({ error: 'AI provider not configured' })
-    if (!FIRECRAWL_API_KEY) return res.status(400).json({ error: 'FIRECRAWL_API_KEY missing' })
     const { prompt, plan: priorPlan, currentUrl, failedAt } = req.body || {}
     if (!prompt || typeof prompt !== 'string') return res.status(400).json({ error: 'prompt required' })
     const startUrl = currentUrl || priorPlan?.url
@@ -454,13 +452,8 @@ app.post('/api/replan', async (req, res) => {
     // Grab a quick HTML snapshot of where we stopped so the planner can pick real selectors.
     let html = ''
     try {
-      const r = await fetch('https://api.firecrawl.dev/v1/scrape', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${FIRECRAWL_API_KEY}` },
-        body: JSON.stringify({ url: startUrl, formats: ['html'], onlyMainContent: false, waitFor: 600, timeout: 45000 }),
-      })
-      const d = await r.json().catch(() => ({}))
-      html = String(d?.data?.html || d?.html || '').slice(0, 18000)
+      const d = await scrape({ url: startUrl, formats: ['html'], onlyMainContent: false, waitFor: 600, timeout: 45000 })
+      html = String(d?.html || '').slice(0, 18000)
     } catch {}
 
     const completedSteps = (priorPlan?.actions || [])
@@ -518,7 +511,7 @@ function describeAction(a) {
   }
 }
 
-// Map plan actions → exact Firecrawl /v1/scrape action schema.
+// Map plan actions → browser action schema.
 // Returns an array (not a single object) so that we can expand bad shapes
 // such as { write, selector, text } into [{click, selector}, {write, text}].
 function sanitizeAction(a) {
@@ -562,33 +555,16 @@ function sanitizeAction(a) {
   }
 }
 
-async function runFirecrawl(plan) {
+async function runPlannedActions(plan) {
   const actions = plan.actions.flatMap(sanitizeAction)
-  const body = {
+  return scrape({
     url: plan.url,
     formats: ['markdown', 'html', 'screenshot'],
     onlyMainContent: false,
     waitFor: 800,
     timeout: 60000,
     actions: toFirecrawlActions(actions),
-  }
-  const r = await fetch('https://api.firecrawl.dev/v1/scrape', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-    },
-    body: JSON.stringify(body),
   })
-  const text = await r.text()
-  let data
-  try { data = JSON.parse(text) } catch {
-    throw new Error(`Firecrawl returned non-JSON (${r.status}): ${text.slice(0, 400)}`)
-  }
-  if (!r.ok || data.success === false) {
-    throw new Error(`Firecrawl ${r.status}: ${data?.error || text.slice(0, 400)}`)
-  }
-  return data.data || data
 }
 
 function evaluateExpectations(plan, scrape) {
@@ -919,7 +895,7 @@ function formatElementsForAI(elements) {
   return lines.join('\n')
 }
 
-// Parse the element-index payload from a Firecrawl scrape response.
+// Parse the element-index payload from a scrape response.
 // Returns an array of element descriptors (or [] if not found).
 function parseElementsFromScrape(scrape) {
   const list = scrape?.actions?.javascriptReturns || scrape?.actions?.javascript_returns || []
@@ -933,7 +909,7 @@ function parseElementsFromScrape(scrape) {
   return []
 }
 
-// Build a JS snippet for Firecrawl's `executeJavascript` action that returns
+// Build a JS snippet for the `executeJavascript` action that returns
 // the bounding rect of a selector + the viewport size. Handles plain CSS
 // selectors and Playwright text-engine selectors (text=Foo, text=/foo/i).
 // The result is read from `data.actions.javascriptReturns`.
@@ -953,7 +929,7 @@ try {
 })()`
 }
 
-// Browser-use style click, ported to run inside Firecrawl's page context via
+// Browser-use style click, run inside the page context via
 // the `executeJavascript` action. Mirrors browser-use's `_click_element_node`
 // (github.com/browser-use/browser-use) but adapted for a JS-only runtime where
 // we can't issue real CDP mouse events:
@@ -973,7 +949,7 @@ try {
 // Return value has no `viewport` field, so `parseRectFromScrape` still finds
 // the rect-probe return in the same call.
 //
-// Runtime assumption: Firecrawl's `executeJavascript` action awaits a Promise
+// Runtime assumption: the `executeJavascript` action awaits a Promise
 // returned by the script (true for Playwright's page.evaluate underneath).
 // We rely on this for the wait-for-element retry loop; if the assumption
 // ever breaks, the click still fires on the first pass inside the async
@@ -989,7 +965,7 @@ try {
   // --- 1. Wait-for-element (mirrors Playwright/browser-use's implicit wait). ---
   // Async-rendered elements appear after the initial DOM is ready, so poll for
   // up to ~1.5s before giving up. Uses setTimeout (not a busy-loop) so the
-  // page keeps loading. Firecrawl's executeJavascript awaits returned Promises.
+  // page keeps loading. The adapter awaits returned Promises.
   var el = null;
   var deadline = Date.now() + 1500;
   while (true) {
@@ -1080,7 +1056,7 @@ try {
 })()`
 }
 
-// Translate sanitized plan actions into the exact payload Firecrawl's
+// Translate sanitized plan actions into the browser action payload.
 // /v1/scrape `actions` array expects. Right now the only translation we do
 // is swapping native `{type:'click', selector}` for an `executeJavascript`
 // action running the browser-use-style click above. Everything else passes
@@ -1114,7 +1090,7 @@ function parseClickResultFromScrape(scrape) {
 }
 
 // Pull the rect-probe return value out of a Firecrawl scrape response.
-// Firecrawl's response shape for executeJavascript can vary; try a few keys.
+// Browser response shape for executeJavascript can vary; try a few keys.
 function parseRectFromScrape(scrape) {
   const list = scrape?.actions?.javascriptReturns || scrape?.actions?.javascript_returns || []
   for (let k = list.length - 1; k >= 0; k--) {
@@ -1141,7 +1117,7 @@ function rectToCursor(rect) {
 
 // Heuristic cursor position (normalized 0..1) for a given action.
 // Used as a fallback when we can't probe the real element rect from the page
-// (Firecrawl `executeJavascript` is the source of truth — see
+// (the `executeJavascript` result is the source of truth — see
 // `selectorRectScript` above). The heuristic still drives non-selector
 // actions (write/press/scroll) and the in-flight cursor before the rect
 // arrives.
@@ -1171,7 +1147,7 @@ function estimateCursor(action, prev) {
   return { x: rand(0.3, 0.7), y: rand(0.3, 0.7) }
 }
 
-// Build Firecrawl actions with a `screenshot` after every interactive action,
+// Build browser actions with a `screenshot` after every interactive action,
 // and a `screenshot` first so we have a frame for the initial page load.
 function buildStreamingActions(planActions) {
   const out = [{ type: 'screenshot' }]
@@ -1658,6 +1634,7 @@ function heuristicFinishVerdict(goal, observation) {
 
 async function fetchAsDataUrl(url, signal) {
   try {
+    if (typeof url === 'string' && url.startsWith('data:')) return url
     const r = await fetch(url, { signal })
     if (!r.ok) return null
     const buf = Buffer.from(await r.arrayBuffer())
@@ -1671,7 +1648,6 @@ app.post('/api/run-agent', async (req, res) => {
   // clients attach to /api/runs/:taskId/events to receive live + replayed
   // events. The run keeps going even if no client is attached.
   if (!AI_READY) return res.status(400).json({ error: 'AI provider not configured' })
-  if (!FIRECRAWL_API_KEY) return res.status(400).json({ error: 'FIRECRAWL_API_KEY missing' })
   const { goal, startUrl, taskId, mode, maxSteps } = req.body || {}
   if (!goal || typeof goal !== 'string') return res.status(400).json({ error: 'goal required' })
   if (!taskId || typeof taskId !== 'string') return res.status(400).json({ error: 'taskId required' })
@@ -1693,16 +1669,14 @@ app.post('/api/run-agent', async (req, res) => {
     try {
 
     async function fcScrape(url, actions, formats = ['screenshot']) {
-      const r = await fetch('https://api.firecrawl.dev/v1/scrape', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${FIRECRAWL_API_KEY}` },
-        body: JSON.stringify({ url, formats, onlyMainContent: false, waitFor: 600, timeout: 60000, actions: toFirecrawlActions(actions) }),
+      return scrape({
+        url,
+        formats,
+        onlyMainContent: false,
+        waitFor: 600,
+        timeout: 60000,
+        actions: toFirecrawlActions(actions),
       })
-      const text = await r.text()
-      let data
-      try { data = JSON.parse(text) } catch { throw new Error(`Firecrawl non-JSON ${r.status}: ${text.slice(0, 200)}`) }
-      if (!r.ok || data.success === false) throw new Error(`Firecrawl ${r.status}: ${data?.error || text.slice(0, 200)}`)
-      return data.data || data
     }
 
     let currentUrl = startUrl || null
@@ -1749,7 +1723,7 @@ app.post('/api/run-agent', async (req, res) => {
             { type: 'screenshot' },
             { type: 'executeJavascript', script: removeOverlayScript() },
           ]
-          // Retry transient Firecrawl failures (timeouts, 5xx, network blips).
+          // Retry transient browser failures (timeouts, crashes, network blips).
           // Critical for long autonomous runs that span hundreds of HTTP calls.
           lastScrape = await withRetry(
             () => fcScrape(currentUrl, acts, ['screenshot', 'html', 'markdown']),
@@ -2020,7 +1994,6 @@ app.post('/api/run-stream', async (req, res) => {
   // Background mode: the planned-run worker is decoupled from the SSE socket.
   // We register the run in `runRegistry`, return immediately, and clients
   // attach to /api/runs/:taskId/events to follow along.
-  if (!FIRECRAWL_API_KEY) return res.status(400).json({ error: 'FIRECRAWL_API_KEY missing' })
   const { plan, taskId } = req.body || {}
   if (!plan || !plan.url) return res.status(400).json({ error: 'plan with url required' })
   if (!taskId || typeof taskId !== 'string') return res.status(400).json({ error: 'taskId required' })
@@ -2038,36 +2011,20 @@ app.post('/api/run-stream', async (req, res) => {
     send('start', { url: plan.url, totalActions: plan.actions.length })
     const start = Date.now()
 
-    // ---- Firecrawl-only progressive streaming ----
-    // We can't keep a session across HTTP calls on standard Firecrawl plans, so
-    // we replay all prior actions on each step and capture a screenshot at the
+    // ---- Local-browser progressive streaming ----
+    // We replay all prior actions on each step and capture a screenshot at the
     // end. The user sees one new frame per planned action, plus an animated
-    // cursor between frames. Slower than a true live stream, but it works on
-    // any Firecrawl plan and on deployment without local browsers.
+    // cursor between frames.
 
     async function fcScrape({ url, actions, formats = ['screenshot'], onlyMain = false }) {
-      const body = {
+      return scrape({
         url,
         formats,
         onlyMainContent: onlyMain,
         waitFor: 600,
         timeout: 60000,
         actions: toFirecrawlActions(actions),
-      }
-      const r = await fetch('https://api.firecrawl.dev/v1/scrape', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${FIRECRAWL_API_KEY}` },
-        body: JSON.stringify(body),
       })
-      const text = await r.text()
-      let data
-      try { data = JSON.parse(text) } catch {
-        throw new Error(`Firecrawl returned non-JSON (${r.status}): ${text.slice(0, 200)}`)
-      }
-      if (!r.ok || data.success === false) {
-        throw new Error(`Firecrawl ${r.status}: ${data?.error || text.slice(0, 200)}`)
-      }
-      return data.data || data
     }
 
     // ---- Self-healing: when a click/wait selector fails, ask the AI to look
@@ -2076,7 +2033,7 @@ app.post('/api/run-stream', async (req, res) => {
     async function repairSelector({ failedAction, intentLabel, html }) {
       try {
         const trimmedHtml = String(html || '').slice(0, 18000)
-        const sys = `You repair broken Playwright selectors for an E2E test runner that uses Firecrawl's actions API.
+        const sys = `You repair broken Playwright selectors for an E2E test runner that uses the local browser actions API.
 You will be given:
 1. The failing action (click or wait) the test agent tried.
 2. A short label describing the user-visible intent.
@@ -2439,12 +2396,11 @@ app.get('/api/runs/:taskId/events', (req, res) => {
 
 app.post('/api/run', async (req, res) => {
   try {
-    if (!FIRECRAWL_API_KEY) return res.status(400).json({ error: 'FIRECRAWL_API_KEY missing' })
     const { plan } = req.body || {}
     if (!plan || !plan.url) return res.status(400).json({ error: 'plan with url required' })
 
     const start = Date.now()
-    const scrape = await runFirecrawl(plan)
+    const scrape = await runPlannedActions(plan)
     const duration = Date.now() - start
 
     const screenshots = []
@@ -2473,6 +2429,10 @@ app.post('/api/run', async (req, res) => {
 })
 
 if (SERVE_STATIC) mountStatic(app)
+
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => { closeBrowser().finally(() => process.exit(0)) })
+}
 
 process.on('unhandledRejection', (e) => console.error('[api] unhandledRejection:', e))
 process.on('uncaughtException',  (e) => console.error('[api] uncaughtException:', e))
